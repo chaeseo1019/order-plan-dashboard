@@ -222,7 +222,7 @@ with st.form("calc_form"):
     fc1, fc2, fc3 = st.columns(3)
     production_qty = fc1.number_input("생산 목표 수량(수요)", min_value=0, value=500, step=50)
     production_deadline = fc2.date_input(
-        "생산마감일자",
+        "생산마감일자 (납기를 위해 생산을 완료해야 하는 일자)",
         value=date.today() + timedelta(days=21),
         help="완제품이 이 날짜까지는 반드시 준비되어 있어야 하는 납기입니다.",
     )
