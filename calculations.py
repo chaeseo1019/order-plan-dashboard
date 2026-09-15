@@ -137,6 +137,27 @@ def compute_order_by_date(production_start_date: Optional[date], lead_time_days)
     return production_start_date - timedelta(days=lead_time_days)
 
 
+def compute_optimal_production_start(
+    production_deadline: Optional[date], production_lead_days
+) -> Optional[date]:
+    """
+    최적 생산 시작일 = 생산마감일자 - 생산소요일
+
+    '생산마감일자'는 완제품이 반드시 준비되어 있어야 하는 진짜 제약(납기)이고,
+    '생산소요일'은 자재가 다 갖춰진 상태에서 실제 생산 공정 자체가
+    며칠 걸리는지를 나타냅니다. 이 둘로 역산하면, 마감일을 맞추기 위해
+    "가장 늦어도 이 날짜에는 생산을 시작해야 한다"는 시작일이 나옵니다.
+    (너무 일찍 시작하면 완제품 재고를 불필요하게 오래 들고 있어야 하므로,
+    이 시작일이 곧 최적의 시작일이 됩니다.)
+    """
+    if production_deadline is None:
+        return None
+    if isinstance(production_deadline, pd.Timestamp):
+        production_deadline = production_deadline.date()
+    production_lead_days = int(_num(production_lead_days))
+    return production_deadline - timedelta(days=production_lead_days)
+
+
 def days_until_order_deadline(order_by_date: Optional[date], today: Optional[date] = None) -> Optional[int]:
     """발주권장일까지 남은 일수 (음수면 이미 늦은 것)"""
     if order_by_date is None:

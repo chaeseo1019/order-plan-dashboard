@@ -24,6 +24,7 @@ from calculations import (
     compute_effective_production_qty,
     compute_order_quantity,
     compute_order_by_date,
+    compute_optimal_production_start,
     days_until_order_deadline,
 )
 
@@ -218,11 +219,21 @@ with st.form("calc_form"):
     st.markdown("### ✏️ 직접 입력")
 
     st.markdown("**2️⃣ 생산 계획**")
-    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1, fc2, fc3 = st.columns(3)
     production_qty = fc1.number_input("생산 목표 수량(수요)", min_value=0, value=500, step=50)
-    production_start = fc2.date_input("생산 시작 예정일", value=date.today() + timedelta(days=14))
+    production_deadline = fc2.date_input(
+        "생산마감일자",
+        value=date.today() + timedelta(days=21),
+        help="완제품이 이 날짜까지는 반드시 준비되어 있어야 하는 납기입니다.",
+    )
     asof_date = fc3.date_input("기준일자 (보통 오늘)", value=date.today())
-    safety_months = fc4.number_input(
+
+    fc4, fc5 = st.columns(2)
+    production_lead_days = fc4.number_input(
+        "생산소요일(일)", min_value=0, value=3, step=1,
+        help="자재가 모두 준비된 상태에서, 생산 공정 자체가 완제품이 나오기까지 며칠 걸리는지입니다.",
+    )
+    safety_months = fc5.number_input(
         "안전재고 기준 (개월)", min_value=0.0, value=1.0, step=0.5,
         help="제품(완제품)에 대해서만 적용됩니다. 이 값에 따라 아래 자재 소요량도 함께 달라집니다.",
     )
@@ -294,7 +305,8 @@ if submitted:
     st.session_state[prev_key] = edited_inputs
     st.session_state[f"last_inputs_{selected_code}"] = {
         "production_qty": production_qty,
-        "production_start": production_start,
+        "production_deadline": production_deadline,
+        "production_lead_days": production_lead_days,
         "asof_date": asof_date,
         "safety_months": safety_months,
         "edited": edited_inputs.copy(),
@@ -313,11 +325,14 @@ if saved is None:
     st.stop()
 
 production_qty = saved["production_qty"]
-production_start = saved["production_start"]
+production_deadline = saved["production_deadline"]
+production_lead_days = saved["production_lead_days"]
 asof_date = saved["asof_date"]
 safety_months = saved["safety_months"]
 edited = saved["edited"]
 lead_time_max = edited["리드타임(일)"].max()
+
+production_start = compute_optimal_production_start(production_deadline, production_lead_days)
 
 avg_outbound_3m = compute_three_month_avg_outbound(flow_df, selected_code, asof_date, months=3)
 safety_stock_product = compute_safety_stock(avg_outbound_3m, safety_months)
@@ -325,16 +340,31 @@ effective_qty = compute_effective_production_qty(production_qty, safety_stock_pr
 
 with st.container(border=True):
     st.markdown("**🔒 제품 레벨 계산 결과**")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3 = st.columns(3)
     c1.metric("🏭 실제 생산 필요량", f"{effective_qty:,.0f}")
-    c2.metric("제품 현재고", f"{current_stock_product:,.0f}")
-    c3.metric("안전재고", f"{safety_stock_product:,.0f}")
-    c4.metric("3개월 평균 출고량", f"{avg_outbound_3m:,.1f}")
-    c5.metric("자재 최대 리드타임", f"{lead_time_max:,.0f}")
+    c2.metric("📅 생산 개시 기한일", f"{production_start.isoformat()}")
+    c3.metric("자재 최대 리드타임", f"{lead_time_max:,.0f}일")
+    st.caption(
+        "생산 개시 기한일 = 생산마감일자 − 생산소요일  →  "
+        "**\"늦어도 이 날짜에는 생산을 시작해야 마감일을 맞출 수 있다\"** 는 뜻입니다. "
+        "아래 자재 발주권장일은 이 시작일을 기준으로 계산됩니다."
+    )
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("제품 현재고", f"{current_stock_product:,.0f}")
+    c5.metric("안전재고", f"{safety_stock_product:,.0f}")
+    c6.metric("3개월 평균 출고량", f"{avg_outbound_3m:,.1f}")
     st.caption(
         "실제 생산 필요량 = MAX(0, (생산 목표 수량 + 안전재고) − 현재고) — "
         "**아래 자재 소요량은 이 수량을 기준으로 계산됩니다.**"
     )
+
+    if production_start < asof_date:
+        st.error(
+            f"🚨 생산 개시 기한일({production_start.isoformat()})이 이미 기준일({asof_date.isoformat()})보다 "
+            "지났습니다. 생산소요일을 감안하면 지금 당장 생산을 시작해도 마감일을 맞추기 어렵습니다. "
+            "생산마감일자를 다시 확인해주세요."
+        )
 
 # 자재별 계산 ---------------------------------------------------
 results = materials[["품목코드", "품목명", "구분", "개당실제투입량", "현재고"]].merge(
@@ -360,7 +390,7 @@ results["D-day"] = results["발주권장일"].apply(
 )
 
 st.caption(
-    "**발주권장일** = 생산 시작 예정일 − 리드타임(일)  →  \"생산 시작일에 자재가 맞춰 들어오려면 "
+    "**발주권장일** = 생산 개시 기한일 − 리드타임(일)  →  \"생산 시작일에 자재가 맞춰 들어오려면 "
     "늦어도 언제까지는 발주를 넣어야 하는가\"를 의미합니다. "
     "(🔴 빨간색: 이미 발주 시점이 지남 / 🟡 노란색: 3일 이내로 임박)"
 )
