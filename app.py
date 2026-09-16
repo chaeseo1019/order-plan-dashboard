@@ -7,9 +7,11 @@
 
 화면 구성 원칙:
   - "✏️ 직접 입력"과 "🔒 자동으로 채워지는 값"을 항상 별도 영역/표로 분리해서 보여줍니다.
-  - 입력이 많아서 한 화면에 다 몰아넣으면 정신없기 때문에, 탭으로 "안전재고 설정"과
-    "생산계획&자재입력"을 나눕니다. (같은 폼 안이라 버튼 하나로 같이 계산됩니다)
-  - 입력값은 폼 안에 모아두고, [발주 계획 계산하기] 버튼을 눌러야만 재계산됩니다.
+  - 입력이 많아서 한 화면에 다 몰아넣으면 정신없기 때문에, 2단계 마법사(wizard)로
+    "① 생산계획&자재입력" → "② 안전재고 설정"을 나눕니다. (생산계획을 먼저 정해야
+    안전재고를 얼마나 가져갈지 가늠하기 쉬우므로 이 순서로 둡니다)
+  - 입력값은 각 단계의 폼 안에 모아두고, 2단계에서 [발주 계획 계산하기] 버튼을
+    눌러야만 계산됩니다.
 """
 
 from datetime import date, timedelta
@@ -223,9 +225,9 @@ if materials.empty:
     st.stop()
 
 # ============================================================
-# 2. 입력 폼 (여기 안의 값은 버튼을 눌러야 계산에 반영됨)
-#    -> 탭으로 "안전재고 설정"과 "생산계획&자재입력"을 나눠서 한 화면에
-#       너무 많은 게 몰리지 않도록 구성. 자재는 표 대신 카드(expander) 방식.
+# 2. 입력 (2단계 마법사: ① 생산계획&자재입력 → ② 안전재고 설정)
+#    각 단계는 st.form으로 묶여있어 버튼을 눌러야 다음으로 넘어가거나 계산됩니다.
+#    자재는 표 대신 카드(expander) 방식.
 # ============================================================
 prev_key = f"material_inputs_{selected_code}"
 prev_df = st.session_state.get(prev_key)
@@ -247,87 +249,35 @@ step = st.session_state[step_key]
 
 st.markdown("### ✏️ 직접 입력")
 if step == 1:
-    st.markdown("**① 안전재고 설정**  →  ② 생산계획 & 자재입력")
+    st.markdown("**① 생산계획 & 자재입력**  →  ② 안전재고 설정")
 else:
-    st.markdown("① 안전재고 설정  →  **② 생산계획 & 자재입력**")
+    st.markdown("① 생산계획 & 자재입력  →  **② 안전재고 설정**")
 
-# ---------------- STEP 1: 안전재고 설정 ----------------
+# ---------------- STEP 1: 생산계획 & 자재입력 ----------------
 if step == 1:
-    with st.form("safety_form"):
-        st.markdown(f"**{HISTORY_START_DATE.isoformat()} ~ {date.today().isoformat()} 생산입고 이력**")
-        st.caption("안전재고 설정에 참고하세요.")
-        if product_history.empty:
-            st.info("이 제품의 생산입고 이력이 없습니다.")
-        else:
-            fig = go.Figure()
-            fig.add_trace(
-                go.Scatter(
-                    x=history_daily["일자"],
-                    y=history_daily["수량"],
-                    mode="lines",
-                    line=dict(color="#2E7D32", width=1.5),
-                    fill="tozeroy",
-                    fillcolor="rgba(46, 125, 50, 0.15)",
-                    hovertemplate="%{x|%Y-%m-%d}<br>생산량: %{y:,.0f}<extra></extra>",
-                )
-            )
-            fig.update_layout(
-                height=320,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title=None,
-                yaxis_title="생산수량",
-                plot_bgcolor="white",
-                hovermode="x unified",
-            )
-            fig.update_xaxes(showgrid=False, rangeslider_visible=False, tickformat="%Y-%m")
-            fig.update_yaxes(showgrid=True, gridcolor="#EEEEEE")
-            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric("생산 횟수", f"{history_stats['count']}회")
-            sc2.metric("총 생산량(누적)", f"{history_stats['total_qty']:,.0f}")
-            sc3.metric("1회 평균 생산량", f"{history_stats['avg_qty']:,.0f}")
-            sc4.metric("최근 생산", f"{history_stats['latest_qty']:,.0f}", help=f"{history_stats['latest_date']}")
-
-        st.divider()
-        safety_stock_qty_input = st.number_input(
-            "✏️ 안전재고 수량",
-            min_value=0,
-            value=int(st.session_state.get(f"safety_qty_{selected_code}", 0)),
-            step=50, width=400,
-            key=f"safety_qty_widget_{selected_code}",
-        )
-        st.caption('지금 당장 필요한 수량(생산 목표 수량) 외에, 여유분으로 얼마나 더 보유하고 있을지를 직접 입력하세요. 위 생산 이력을 참고해서 정하시면 됩니다.')
-
-        go_next = st.form_submit_button("다음 단계로 ▶", type="primary", width=400)
-
-    if go_next:
-        st.session_state[f"safety_qty_{selected_code}"] = safety_stock_qty_input
-        st.session_state[step_key] = 2
-        st.rerun()
-
-# ---------------- STEP 2: 생산계획 & 자재입력 ----------------
-else:
+    _saved_plan = st.session_state.get(f"plan_values_{selected_code}", {})
     with st.form("plan_form"):
         st.markdown("**생산 계획**")
         fc1, fc2, fc3 = st.columns(3)
         production_qty = fc1.number_input(
-            "생산 목표 수량(수요)", min_value=0, value=500, step=50,
+            "생산 목표 수량(수요)", min_value=0,
+            value=int(_saved_plan.get("production_qty", 500)), step=50,
             key=f"prod_qty_{selected_code}",
         )
         production_deadline = fc2.date_input(
             "생산마감일자",
-            value=date.today() + timedelta(days=21),
+            value=_saved_plan.get("production_deadline", date.today() + timedelta(days=21)),
             help="완제품이 이 날짜까지는 반드시 준비되어 있어야 하는 납기입니다.",
             key=f"prod_deadline_{selected_code}",
         )
         asof_date = fc3.date_input(
-            "기준일자 (보통 오늘)", value=date.today(),
+            "기준일자 (보통 오늘)", value=_saved_plan.get("asof_date", date.today()),
             key=f"asof_{selected_code}",
         )
 
         production_lead_days = st.number_input(
-            "생산소요일(일)", min_value=0, value=3, step=1,
+            "생산소요일(일)", min_value=0,
+            value=int(_saved_plan.get("production_lead_days", 3)), step=1,
             help="자재가 모두 준비된 상태에서, 생산 공정 자체가 완제품이 나오기까지 며칠 걸리는지입니다.",
             key=f"prod_lead_{selected_code}",
         )
@@ -393,24 +343,98 @@ else:
             )
 
         edited_inputs = pd.DataFrame(input_rows)
+        go_next = st.form_submit_button("다음 단계로 ▶", type="primary", width="stretch")
+
+    if go_next:
+        st.session_state[prev_key] = edited_inputs
+        st.session_state[f"plan_values_{selected_code}"] = {
+            "production_qty": production_qty,
+            "production_deadline": production_deadline,
+            "production_lead_days": production_lead_days,
+            "asof_date": asof_date,
+        }
+        st.session_state[step_key] = 2
+        st.rerun()
+
+# ---------------- STEP 2: 안전재고 설정 ----------------
+else:
+    # 1단계에서 입력한 생산계획을 참고할 수 있도록 같이 보여줍니다.
+    # (위젯 key에 직접 의존하면 이 단계에서는 그 위젯이 렌더링되지 않아 값이
+    #  session_state에서 사라질 수 있어서, 1단계 제출 시 별도로 저장해둔 값을 씁니다)
+    plan_values = st.session_state.get(f"plan_values_{selected_code}", {})
+    plan_qty = plan_values.get("production_qty", 0)
+    plan_deadline = plan_values.get("production_deadline")
+    plan_lead_days = plan_values.get("production_lead_days", 0)
+    st.info(
+        f"📋 방금 입력한 생산계획 — 생산 목표 수량: **{plan_qty:,.0f}개** · "
+        f"생산마감일자: **{plan_deadline.isoformat() if plan_deadline else '-'}**  · "
+        f"생산소요일: **{plan_lead_days}일**"
+    )
+
+    with st.form("safety_form"):
+        st.markdown(f"**{HISTORY_START_DATE.isoformat()} ~ {date.today().isoformat()} 생산입고 이력**")
+        st.caption("안전재고 설정에 참고하세요.")
+        if product_history.empty:
+            st.info("이 제품의 생산입고 이력이 없습니다.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=history_daily["일자"],
+                    y=history_daily["수량"],
+                    mode="lines",
+                    line=dict(color="#2E7D32", width=1.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(46, 125, 50, 0.15)",
+                    hovertemplate="%{x|%Y-%m-%d}<br>생산량: %{y:,.0f}<extra></extra>",
+                )
+            )
+            fig.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title=None,
+                yaxis_title="생산수량",
+                plot_bgcolor="white",
+                hovermode="x unified",
+            )
+            fig.update_xaxes(showgrid=False, rangeslider_visible=False, tickformat="%Y-%m")
+            fig.update_yaxes(showgrid=True, gridcolor="#EEEEEE")
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("생산 횟수", f"{history_stats['count']}회")
+            sc2.metric("총 생산량(누적)", f"{history_stats['total_qty']:,.0f}")
+            sc3.metric("1회 평균 생산량", f"{history_stats['avg_qty']:,.0f}")
+            sc4.metric("최근 생산", f"{history_stats['latest_qty']:,.0f}", help=f"{history_stats['latest_date']}")
+
+        st.divider()
+        safety_stock_qty_input = st.number_input(
+            "✏️ 안전재고 수량",
+            min_value=0,
+            value=int(st.session_state.get(f"safety_qty_{selected_code}", 0)),
+            step=50, width=400,
+            key=f"safety_qty_widget_{selected_code}",
+        )
+        st.caption('지금 당장 필요한 수량(생산 목표 수량) 외에, 여유분으로 얼마나 더 보유하고 있을지를 직접 입력하세요. 위 생산 이력을 참고해서 정하시면 됩니다.')
 
         nav1, nav2 = st.columns([1, 2])
         go_back = nav1.form_submit_button("◀ 이전 단계로", width="stretch")
         submitted = nav2.form_submit_button("📊 발주 계획 계산하기", type="primary", width="stretch")
 
     if go_back:
+        st.session_state[f"safety_qty_{selected_code}"] = safety_stock_qty_input
         st.session_state[step_key] = 1
         st.rerun()
 
     if submitted:
-        safety_stock_qty = st.session_state.get(f"safety_qty_{selected_code}", 0)
-        st.session_state[prev_key] = edited_inputs
+        st.session_state[f"safety_qty_{selected_code}"] = safety_stock_qty_input
+        edited_inputs = st.session_state.get(prev_key)
         st.session_state[f"last_inputs_{selected_code}"] = {
-            "production_qty": production_qty,
-            "production_deadline": production_deadline,
-            "production_lead_days": production_lead_days,
-            "asof_date": asof_date,
-            "safety_stock_qty": safety_stock_qty,
+            "production_qty": plan_qty,
+            "production_deadline": plan_deadline,
+            "production_lead_days": plan_lead_days,
+            "asof_date": plan_values.get("asof_date"),
+            "safety_stock_qty": safety_stock_qty_input,
             "edited": edited_inputs.copy(),
         }
 
@@ -423,7 +447,7 @@ st.divider()
 st.subheader("🧮 4️⃣ 계산 결과")
 
 if saved is None:
-    st.info("위 탭에서 값을 입력하고 **[📊 발주 계획 계산하기]** 버튼을 눌러주세요.")
+    st.info("위에서 값을 입력하고 **[📊 발주 계획 계산하기]** 버튼을 눌러주세요.")
     st.stop()
 
 production_qty = saved["production_qty"]
