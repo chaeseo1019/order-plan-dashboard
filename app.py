@@ -1,25 +1,27 @@
 """
 제품별 발주 계획 대시보드
 --------------------------
-월별재고수불부 + 최신재고현황 + 제품_BOM 시트가 포함된 엑셀 파일을 업로드하면,
+제품_BOM + 최신재고현황 + 생산입고현황 시트가 포함된 엑셀 파일을 업로드하면,
 제품을 선택해 생산 계획을 입력하고, 자재별 발주 조건(로스율/주문업체/국내외/
 리드타임/입고예정수량/MOQ)을 입력해서 필요수량·발주수량·발주권장일을 계산합니다.
 
 화면 구성 원칙:
   - "✏️ 직접 입력"과 "🔒 자동으로 채워지는 값"을 항상 별도 영역/표로 분리해서 보여줍니다.
-  - 입력값은 st.form 안에 모아두고, [발주 계획 계산하기] 버튼을 눌러야만 재계산됩니다.
+  - 입력이 많아서 한 화면에 다 몰아넣으면 정신없기 때문에, 탭으로 "안전재고 설정"과
+    "생산계획&자재입력"을 나눕니다. (같은 폼 안이라 버튼 하나로 같이 계산됩니다)
+  - 입력값은 폼 안에 모아두고, [발주 계획 계산하기] 버튼을 눌러야만 재계산됩니다.
 """
 
 from datetime import date, timedelta
 from io import BytesIO
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from calculations import (
-    compute_three_month_avg_outbound,
+    summarize_production_history,
     compute_material_requirement,
-    compute_safety_stock,
     compute_required_order_qty,
     compute_effective_production_qty,
     compute_order_quantity,
@@ -27,13 +29,14 @@ from calculations import (
     compute_optimal_production_start,
     days_until_order_deadline,
 )
+from data_prep import clean_production_history
 
 st.set_page_config(page_title="발주 계획 대시보드", layout="wide")
 
 REQUIRED_BOM_COLS = ["제품코드", "제품명", "품목코드", "품목명", "수량"]
 REQUIRED_INV_COLS = ["품목코드", "품목구분", "품목명[규격]", "재고수량"]
-REQUIRED_FLOW_COLS = ["기준날짜", "품목코드", "품목명", "입고", "출고", "재고"]
-FLOW_SHEET_CANDIDATES = ["월별재고수불부_병합", "월별재고수불부_선별", "월별재고수불부"]
+REQUIRED_PROD_COLS = ["일자", "품목코드", "수량"]
+PROD_SHEET_CANDIDATES = ["생산입고현황", "생산입고조회"]
 
 
 # ============================================================
@@ -45,12 +48,12 @@ def load_excel(file_bytes: bytes) -> dict:
     return {name: pd.read_excel(xls, sheet_name=name) for name in xls.sheet_names}
 
 
-def find_flow_sheet(sheets: dict) -> str | None:
-    for name in FLOW_SHEET_CANDIDATES:
+def find_prod_sheet(sheets: dict) -> str | None:
+    for name in PROD_SHEET_CANDIDATES:
         if name in sheets:
             return name
     for name in sheets:
-        if "수불부" in name:
+        if "생산입고" in name:
             return name
     return None
 
@@ -86,7 +89,7 @@ with st.expander("ℹ️ 사용법 / 엑셀 파일 형식 안내 (클릭하세�
         |---|---|
         | `제품_BOM` | 제품코드, 제품명, 품목코드, 품목명, 수량 |
         | `최신재고현황` | 품목코드, 품목구분, 품목명[규격], 재고수량 |
-        | `월별재고수불부` | 기준날짜(YYYY-MM), 품목코드, 품목명, 입고, 출고, 재고 |
+        | `생산입고현황` | 일자, 품목코드, 수량 (그 외 출고창고명/입고창고명/품목구분/품목명/생산금액은 있어도 무방) |
 
         **화면 보는 법**
         - ✏️ 표시가 있는 영역/칸은 직접 입력해야 하는 값입니다.
@@ -110,30 +113,32 @@ if "최신재고현황" not in sheets:
     st.error("'최신재고현황' 시트를 찾을 수 없습니다. 엑셀 파일을 확인해주세요.")
     st.stop()
 
-flow_sheet_name = find_flow_sheet(sheets)
-if flow_sheet_name is None:
-    st.error("'월별재고수불부' 관련 시트를 찾을 수 없습니다. 엑셀 파일을 확인해주세요.")
+prod_sheet_name = find_prod_sheet(sheets)
+if prod_sheet_name is None:
+    st.error("'생산입고현황' 관련 시트를 찾을 수 없습니다. 엑셀 파일을 확인해주세요.")
     st.stop()
 
 bom_df = sheets["제품_BOM"].copy()
 inv_df = sheets["최신재고현황"].copy()
-flow_df = sheets[flow_sheet_name].copy()
+prod_df = sheets[prod_sheet_name].copy()
 
 validate_columns(bom_df, REQUIRED_BOM_COLS, "제품_BOM")
 validate_columns(inv_df, REQUIRED_INV_COLS, "최신재고현황")
-validate_columns(flow_df, REQUIRED_FLOW_COLS, flow_sheet_name)
+validate_columns(prod_df, REQUIRED_PROD_COLS, prod_sheet_name)
+
+# 생산입고현황 원본 정리: 일자의 ' -1'/' -2' 접미사 제거 + 품목코드 없는 행(합계행 등) 제외
+prod_df = clean_production_history(prod_df)
 
 bom_df["제품코드"] = normalize_code(bom_df["제품코드"])
 bom_df["품목코드"] = normalize_code(bom_df["품목코드"])
 inv_df["품목코드"] = normalize_code(inv_df["품목코드"])
-flow_df["품목코드"] = normalize_code(flow_df["품목코드"])
-flow_df["기준날짜"] = flow_df["기준날짜"].astype(str)
+prod_df["품목코드"] = normalize_code(prod_df["품목코드"])
 
 inv_lookup = inv_df.set_index("품목코드")
 
 st.success(
     f"업로드 완료 — 제품_BOM {bom_df['제품코드'].nunique()}개 제품 / "
-    f"최신재고현황 {len(inv_df)}개 품목 / {flow_sheet_name} {len(flow_df)}행"
+    f"최신재고현황 {len(inv_df)}개 품목 / {prod_sheet_name} {len(prod_df)}행"
 )
 
 # ============================================================
@@ -167,6 +172,26 @@ materials = materials.reset_index(drop=True)
 
 current_stock_product = float(inv_lookup["재고수량"].get(selected_code, 0) or 0)
 
+product_history = (
+    prod_df[prod_df["품목코드"] == selected_code][["일자", "수량"]]
+    .groupby("일자", as_index=False)["수량"].sum()
+    .sort_values("일자")
+    .reset_index(drop=True)
+)
+history_stats = summarize_production_history(product_history)
+
+# 차트용: 생산이 없었던 날도 0으로 채운 일별 연속 시계열 (통계 계산에는 쓰지 않고 그래프 전용)
+HISTORY_START_DATE = date(2025, 1, 1)
+full_date_range = pd.date_range(start=HISTORY_START_DATE, end=date.today(), freq="D")
+history_by_date = product_history.copy()
+history_by_date["일자"] = pd.to_datetime(history_by_date["일자"])
+history_daily = (
+    history_by_date.set_index("일자")["수량"]
+    .reindex(full_date_range, fill_value=0)
+    .rename_axis("일자")
+    .reset_index(name="수량")
+)
+
 st.subheader(f"📌 {selected_code} | {product_name}")
 
 # ------------------------------------------------------------
@@ -199,8 +224,8 @@ if materials.empty:
 
 # ============================================================
 # 2. 입력 폼 (여기 안의 값은 버튼을 눌러야 계산에 반영됨)
-#    -> 표(data_editor) 대신, 자재별 카드(expander) + 개별 입력 위젯 방식.
-#       카드를 펼치면 안에 있는 건 전부 "입력해야 하는 값"이라 헷갈릴 일이 없습니다.
+#    -> 탭으로 "안전재고 설정"과 "생산계획&자재입력"을 나눠서 한 화면에
+#       너무 많은 게 몰리지 않도록 구성. 자재는 표 대신 카드(expander) 방식.
 # ============================================================
 prev_key = f"material_inputs_{selected_code}"
 prev_df = st.session_state.get(prev_key)
@@ -215,102 +240,179 @@ def _prev_value(item_code: str, col: str, default):
     return row.iloc[0][col]
 
 
-with st.form("calc_form"):
-    st.markdown("### ✏️ 직접 입력")
+step_key = f"wizard_step_{selected_code}"
+if step_key not in st.session_state:
+    st.session_state[step_key] = 1
+step = st.session_state[step_key]
 
-    st.markdown("**2️⃣ 생산 계획**")
-    fc1, fc2, fc3 = st.columns(3)
-    production_qty = fc1.number_input("생산 목표 수량(수요)", min_value=0, value=500, step=50)
-    production_deadline = fc2.date_input(
-        "생산마감일자 (납기를 위해 생산을 완료해야 하는 일자)",
-        value=date.today() + timedelta(days=21),
-        help="완제품이 이 날짜까지는 반드시 준비되어 있어야 하는 납기입니다.",
-    )
-    asof_date = fc3.date_input("기준일자 (보통 오늘)", value=date.today())
+st.markdown("### ✏️ 직접 입력")
+if step == 1:
+    st.markdown("**① 안전재고 설정**  →  ② 생산계획 & 자재입력")
+else:
+    st.markdown("① 안전재고 설정  →  **② 생산계획 & 자재입력**")
 
-    fc4, fc5 = st.columns(2)
-    production_lead_days = fc4.number_input(
-        "생산소요일(일)", min_value=0, value=3, step=1,
-        help="자재가 모두 준비된 상태에서, 생산 공정 자체가 완제품이 나오기까지 며칠 걸리는지입니다.",
-    )
-    safety_months = fc5.number_input(
-        "안전재고 기준 (개월)", min_value=0.0, value=1.0, step=0.5,
-        help="제품(완제품)에 대해서만 적용됩니다. 이 값에 따라 아래 자재 소요량도 함께 달라집니다.",
-    )
-
-    st.markdown("**3️⃣ 자재별 발주 조건** — 자재를 펼쳐서 입력하세요. (카드 안 = 전부 입력값)")
-
-    input_rows = []
-    for _, m in materials.iterrows():
-        item_code = m["품목코드"]
-        item_name = m["품목명"]
-        key_prefix = f"{selected_code}_{item_code}"
-
-        with st.expander(
-            f"🔧 {item_code} | {item_name}   "
-            f"(🔒 참고: 현재고 {m['현재고']:,.0f} · 개당실제투입량 {m['개당실제투입량']:.4f} · 구분 {m['구분']})"
-        ):
-            ic1, ic2, ic3 = st.columns(3)
-            loss_pct = ic1.number_input(
-                "예상로스율(%)", min_value=0, max_value=100, step=1,
-                value=int(round(_prev_value(item_code, "예상로스율", 0.0) * 100)),
-                key=f"loss_{key_prefix}",
+# ---------------- STEP 1: 안전재고 설정 ----------------
+if step == 1:
+    with st.form("safety_form"):
+        st.markdown(f"**{HISTORY_START_DATE.isoformat()} ~ {date.today().isoformat()} 생산입고 이력**")
+        st.caption("안전재고 설정에 참고하세요.")
+        if product_history.empty:
+            st.info("이 제품의 생산입고 이력이 없습니다.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=history_daily["일자"],
+                    y=history_daily["수량"],
+                    mode="lines",
+                    line=dict(color="#2E7D32", width=1.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(46, 125, 50, 0.15)",
+                    hovertemplate="%{x|%Y-%m-%d}<br>생산량: %{y:,.0f}<extra></extra>",
+                )
             )
-            vendor = ic2.text_input(
-                "주문업체", value=str(_prev_value(item_code, "주문업체", "")),
-                key=f"vendor_{key_prefix}",
+            fig.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title=None,
+                yaxis_title="생산수량",
+                plot_bgcolor="white",
+                hovermode="x unified",
             )
-            prev_origin = _prev_value(item_code, "국내/외", "국내")
-            origin = ic3.selectbox(
-                "국내/외", ["국내", "해외"],
-                index=0 if prev_origin != "해외" else 1,
-                key=f"origin_{key_prefix}",
-            )
+            fig.update_xaxes(showgrid=False, rangeslider_visible=False, tickformat="%Y-%m")
+            fig.update_yaxes(showgrid=True, gridcolor="#EEEEEE")
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
-            ic4, ic5, ic6 = st.columns(3)
-            lead_time = ic4.number_input(
-                "리드타임(일)", min_value=0, step=1,
-                value=int(_prev_value(item_code, "리드타임(일)", 0)),
-                key=f"lead_{key_prefix}",
-            )
-            incoming = ic5.number_input(
-                "입고예정수량", min_value=0, step=1,
-                value=int(_prev_value(item_code, "입고예정수량", 0)),
-                key=f"incoming_{key_prefix}",
-            )
-            moq = ic6.number_input(
-                "MOQ", min_value=0, step=1,
-                value=int(_prev_value(item_code, "MOQ", 0)),
-                help="0이면 MOQ 제약 없이 필요수량 그대로 발주",
-                key=f"moq_{key_prefix}",
-            )
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("생산 횟수", f"{history_stats['count']}회")
+            sc2.metric("총 생산량(누적)", f"{history_stats['total_qty']:,.0f}")
+            sc3.metric("1회 평균 생산량", f"{history_stats['avg_qty']:,.0f}")
+            sc4.metric("최근 생산", f"{history_stats['latest_qty']:,.0f}", help=f"{history_stats['latest_date']}")
 
-        input_rows.append(
-            {
-                "품목코드": item_code,
-                "품목명": item_name,
-                "예상로스율": loss_pct / 100,
-                "주문업체": vendor,
-                "국내/외": origin,
-                "리드타임(일)": lead_time,
-                "입고예정수량": incoming,
-                "MOQ": moq,
-            }
+        st.divider()
+        safety_stock_qty_input = st.number_input(
+            "✏️ 안전재고 수량",
+            min_value=0,
+            value=int(st.session_state.get(f"safety_qty_{selected_code}", 0)),
+            step=50, width=400,
+            key=f"safety_qty_widget_{selected_code}",
+        )
+        st.caption('지금 당장 필요한 수량(생산 목표 수량) 외에, 여유분으로 얼마나 더 보유하고 있을지를 직접 입력하세요. 위 생산 이력을 참고해서 정하시면 됩니다.')
+
+        go_next = st.form_submit_button("다음 단계로 ▶", type="primary", width=400)
+
+    if go_next:
+        st.session_state[f"safety_qty_{selected_code}"] = safety_stock_qty_input
+        st.session_state[step_key] = 2
+        st.rerun()
+
+# ---------------- STEP 2: 생산계획 & 자재입력 ----------------
+else:
+    with st.form("plan_form"):
+        st.markdown("**생산 계획**")
+        fc1, fc2, fc3 = st.columns(3)
+        production_qty = fc1.number_input(
+            "생산 목표 수량(수요)", min_value=0, value=500, step=50,
+            key=f"prod_qty_{selected_code}",
+        )
+        production_deadline = fc2.date_input(
+            "생산마감일자",
+            value=date.today() + timedelta(days=21),
+            help="완제품이 이 날짜까지는 반드시 준비되어 있어야 하는 납기입니다.",
+            key=f"prod_deadline_{selected_code}",
+        )
+        asof_date = fc3.date_input(
+            "기준일자 (보통 오늘)", value=date.today(),
+            key=f"asof_{selected_code}",
         )
 
-    edited_inputs = pd.DataFrame(input_rows)
-    submitted = st.form_submit_button("📊 발주 계획 계산하기", type="primary", use_container_width=True)
+        production_lead_days = st.number_input(
+            "생산소요일(일)", min_value=0, value=3, step=1,
+            help="자재가 모두 준비된 상태에서, 생산 공정 자체가 완제품이 나오기까지 며칠 걸리는지입니다.",
+            key=f"prod_lead_{selected_code}",
+        )
 
-if submitted:
-    st.session_state[prev_key] = edited_inputs
-    st.session_state[f"last_inputs_{selected_code}"] = {
-        "production_qty": production_qty,
-        "production_deadline": production_deadline,
-        "production_lead_days": production_lead_days,
-        "asof_date": asof_date,
-        "safety_months": safety_months,
-        "edited": edited_inputs.copy(),
-    }
+        st.markdown("**자재별 발주 조건** — 자재를 펼쳐서 입력하세요. (카드 안 = 전부 입력값)")
+
+        input_rows = []
+        for _, m in materials.iterrows():
+            item_code = m["품목코드"]
+            item_name = m["품목명"]
+            key_prefix = f"{selected_code}_{item_code}"
+
+            with st.expander(
+                f"🔧 {item_code} | {item_name}   "
+                f"(🔒 참고: 현재고 {m['현재고']:,.0f} · 개당실제투입량 {m['개당실제투입량']:.4f} · 구분 {m['구분']})"
+            ):
+                ic1, ic2, ic3 = st.columns(3)
+                loss_pct = ic1.number_input(
+                    "예상로스율(%)", min_value=0, max_value=100, step=1,
+                    value=int(round(_prev_value(item_code, "예상로스율", 0.0) * 100)),
+                    key=f"loss_{key_prefix}",
+                )
+                vendor = ic2.text_input(
+                    "주문업체", value=str(_prev_value(item_code, "주문업체", "")),
+                    key=f"vendor_{key_prefix}",
+                )
+                prev_origin = _prev_value(item_code, "국내/외", "국내")
+                origin = ic3.selectbox(
+                    "국내/외", ["국내", "해외"],
+                    index=0 if prev_origin != "해외" else 1,
+                    key=f"origin_{key_prefix}",
+                )
+
+                ic4, ic5, ic6 = st.columns(3)
+                lead_time = ic4.number_input(
+                    "리드타임(일)", min_value=0, step=1,
+                    value=int(_prev_value(item_code, "리드타임(일)", 0)),
+                    key=f"lead_{key_prefix}",
+                )
+                incoming = ic5.number_input(
+                    "입고예정수량", min_value=0, step=1,
+                    value=int(_prev_value(item_code, "입고예정수량", 0)),
+                    key=f"incoming_{key_prefix}",
+                )
+                moq = ic6.number_input(
+                    "MOQ", min_value=0, step=1,
+                    value=int(_prev_value(item_code, "MOQ", 0)),
+                    help="0이면 MOQ 제약 없이 필요수량 그대로 발주",
+                    key=f"moq_{key_prefix}",
+                )
+
+            input_rows.append(
+                {
+                    "품목코드": item_code,
+                    "품목명": item_name,
+                    "예상로스율": loss_pct / 100,
+                    "주문업체": vendor,
+                    "국내/외": origin,
+                    "리드타임(일)": lead_time,
+                    "입고예정수량": incoming,
+                    "MOQ": moq,
+                }
+            )
+
+        edited_inputs = pd.DataFrame(input_rows)
+
+        nav1, nav2 = st.columns([1, 2])
+        go_back = nav1.form_submit_button("◀ 이전 단계로", width="stretch")
+        submitted = nav2.form_submit_button("📊 발주 계획 계산하기", type="primary", width="stretch")
+
+    if go_back:
+        st.session_state[step_key] = 1
+        st.rerun()
+
+    if submitted:
+        safety_stock_qty = st.session_state.get(f"safety_qty_{selected_code}", 0)
+        st.session_state[prev_key] = edited_inputs
+        st.session_state[f"last_inputs_{selected_code}"] = {
+            "production_qty": production_qty,
+            "production_deadline": production_deadline,
+            "production_lead_days": production_lead_days,
+            "asof_date": asof_date,
+            "safety_stock_qty": safety_stock_qty,
+            "edited": edited_inputs.copy(),
+        }
 
 # ============================================================
 # 3. 계산 결과 (마지막으로 '계산하기'를 누른 값 기준으로만 표시)
@@ -318,42 +420,38 @@ if submitted:
 saved = st.session_state.get(f"last_inputs_{selected_code}")
 
 st.divider()
-st.subheader("🧮 계산 결과")
+st.subheader("🧮 4️⃣ 계산 결과")
 
 if saved is None:
-    st.info("위에서 값을 입력하고 **[📊 발주 계획 계산하기]** 버튼을 눌러주세요.")
+    st.info("위 탭에서 값을 입력하고 **[📊 발주 계획 계산하기]** 버튼을 눌러주세요.")
     st.stop()
 
 production_qty = saved["production_qty"]
 production_deadline = saved["production_deadline"]
 production_lead_days = saved["production_lead_days"]
 asof_date = saved["asof_date"]
-safety_months = saved["safety_months"]
+safety_stock_qty = saved["safety_stock_qty"]
 edited = saved["edited"]
 lead_time_max = edited["리드타임(일)"].max()
 
 production_start = compute_optimal_production_start(production_deadline, production_lead_days)
-
-avg_outbound_3m = compute_three_month_avg_outbound(flow_df, selected_code, asof_date, months=3)
-safety_stock_product = compute_safety_stock(avg_outbound_3m, safety_months)
-effective_qty = compute_effective_production_qty(production_qty, safety_stock_product, current_stock_product)
+effective_qty = compute_effective_production_qty(production_qty, safety_stock_qty, current_stock_product)
 
 with st.container(border=True):
     st.markdown("**🔒 제품 레벨 계산 결과**")
     c1, c2, c3 = st.columns(3)
     c1.metric("🏭 실제 생산 필요량", f"{effective_qty:,.0f}")
-    c2.metric("📅 생산 개시 기한일", f"{production_start.isoformat()}")
+    c2.metric("📅 최적 생산 시작일", f"{production_start.isoformat()}")
     c3.metric("자재 최대 리드타임", f"{lead_time_max:,.0f}일")
     st.caption(
-        "생산 개시 기한일 = 생산마감일자 − 생산소요일  →  "
-        "**\"늦어도 이 날짜에는 생산을 시작해야 마감일을 맞출 수 있다\"** 는 뜻입니다. "
+        "최적 생산 시작일 = 생산마감일자 − 생산소요일  →  "
+        "**\"늦어도 이 날짜에는 생산을 시작해야 마감일을 맞출 수 있다\"**는 뜻입니다. "
         "아래 자재 발주권장일은 이 시작일을 기준으로 계산됩니다."
     )
 
-    c4, c5, c6 = st.columns(3)
+    c4, c5 = st.columns(2)
     c4.metric("제품 현재고", f"{current_stock_product:,.0f}")
-    c5.metric("안전재고", f"{safety_stock_product:,.0f}")
-    c6.metric("3개월 평균 출고량", f"{avg_outbound_3m:,.1f}")
+    c5.metric("안전재고(입력값)", f"{safety_stock_qty:,.0f}")
     st.caption(
         "실제 생산 필요량 = MAX(0, (생산 목표 수량 + 안전재고) − 현재고) — "
         "**아래 자재 소요량은 이 수량을 기준으로 계산됩니다.**"
@@ -361,7 +459,7 @@ with st.container(border=True):
 
     if production_start < asof_date:
         st.error(
-            f"🚨 생산 개시 기한일({production_start.isoformat()})이 이미 기준일({asof_date.isoformat()})보다 "
+            f"🚨 최적 생산 시작일({production_start.isoformat()})이 이미 기준일({asof_date.isoformat()})보다 "
             "지났습니다. 생산소요일을 감안하면 지금 당장 생산을 시작해도 마감일을 맞추기 어렵습니다. "
             "생산마감일자를 다시 확인해주세요."
         )
@@ -390,7 +488,7 @@ results["D-day"] = results["발주권장일"].apply(
 )
 
 st.caption(
-    "**발주권장일** = 생산 개시 기한일 − 리드타임(일)  →  \"생산 시작일에 자재가 맞춰 들어오려면 "
+    "**발주권장일** = 최적 생산 시작일 − 리드타임(일)  →  \"생산 시작일에 자재가 맞춰 들어오려면 "
     "늦어도 언제까지는 발주를 넣어야 하는가\"를 의미합니다. "
     "(🔴 빨간색: 이미 발주 시점이 지남 / 🟡 노란색: 3일 이내로 임박)"
 )
@@ -451,7 +549,7 @@ else:
     st.success("현재 재고(+입고예정)로 충분합니다. 추가 발주가 필요하지 않습니다.")
 
 # ============================================================
-# 4. 결과 다운로드
+# 5️⃣ 결과 다운로드
 # ============================================================
 st.subheader("⬇️ 결과 다운로드")
 csv = results[display_cols].to_csv(index=False).encode("utf-8-sig")

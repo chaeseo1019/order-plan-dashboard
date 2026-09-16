@@ -31,35 +31,28 @@ def _num(value, default: float = 0.0) -> float:
         return default
 
 
-def compute_three_month_avg_outbound(
-    flow_df: pd.DataFrame,
-    item_code: str,
-    asof_date: date,
-    months: int = 3,
-) -> float:
+def summarize_production_history(history_df: pd.DataFrame, qty_col: str = "수량", date_col: str = "일자") -> dict:
     """
-    월별재고수불부에서 asof_date가 속한 달을 포함해 최근 `months`개월의
-    평균 출고량을 계산합니다. (엑셀의 AVERAGEIFS(집계기간) 로직과 동일)
+    생산입고현황에서 특정 제품의 이력만 뽑아온 데이터프레임을 받아
+    안전재고 수량을 정할 때 참고할 요약 통계를 계산합니다.
 
-    flow_df: 컬럼 ['기준날짜'(YYYY-MM 문자열), '품목코드', '출고', ...]
+    반환: count(생산 횟수), total_qty(총 생산량), avg_qty(1회 평균 생산량),
+          latest_date(가장 최근 생산일), latest_qty(가장 최근 생산량)
     """
-    if flow_df is None or flow_df.empty:
-        return 0.0
+    if history_df is None or history_df.empty:
+        return {"count": 0, "total_qty": 0.0, "avg_qty": 0.0, "latest_date": None, "latest_qty": 0.0}
 
-    if isinstance(asof_date, pd.Timestamp):
-        asof_date = asof_date.date()
-
-    asof_period = pd.Period(asof_date, freq="M")
-    start_period = asof_period - (months - 1)
-    month_strs = {p.strftime("%Y-%m") for p in pd.period_range(start_period, asof_period, freq="M")}
-
-    sub = flow_df[
-        (flow_df["품목코드"].astype(str) == str(item_code))
-        & (flow_df["기준날짜"].astype(str).isin(month_strs))
-    ]
-    if sub.empty:
-        return 0.0
-    return float(sub["출고"].mean())
+    count = len(history_df)
+    total_qty = float(history_df[qty_col].sum())
+    avg_qty = total_qty / count if count else 0.0
+    latest_row = history_df.sort_values(date_col).iloc[-1]
+    return {
+        "count": count,
+        "total_qty": total_qty,
+        "avg_qty": avg_qty,
+        "latest_date": latest_row[date_col],
+        "latest_qty": float(latest_row[qty_col]),
+    }
 
 
 def compute_material_requirement(production_qty, unit_usage, loss_rate) -> int:
@@ -71,13 +64,6 @@ def compute_material_requirement(production_qty, unit_usage, loss_rate) -> int:
     loss_rate = _num(loss_rate)
     raw = production_qty * unit_usage * (1 + loss_rate)
     return math.ceil(raw)
-
-
-def compute_safety_stock(avg_outbound, months_buffer) -> int:
-    """안전재고 = 안전재고기준(개월) × 3개월평균출고량"""
-    avg_outbound = _num(avg_outbound)
-    months_buffer = _num(months_buffer)
-    return round(avg_outbound * months_buffer)
 
 
 def compute_required_order_qty(demand_qty, safety_stock, current_stock, incoming_qty) -> int:
@@ -96,10 +82,8 @@ def compute_effective_production_qty(target_qty, safety_stock, current_stock) ->
     실제 생산 필요량 (자재 소요량 계산의 기준이 되는 수량)
     = MAX(0, (생산 목표 수량 + 안전재고) - 현재고)
 
-    예전 버전의 버그: '생산 지시량'을 그대로 자재 계산에 썼기 때문에
-    안전재고 기준(개월)을 바꿔도 결과가 전혀 달라지지 않았습니다.
-    지금은 안전재고·현재고까지 반영된 '실제 생산 필요량'을 자재 계산의
-    기준으로 사용하도록 수정했습니다.
+    안전재고는 이제 사용자가 수량으로 직접 입력한 값입니다
+    (예전처럼 '몇 개월치'를 곱해서 자동 산출하지 않습니다).
     """
     target_qty = _num(target_qty)
     safety_stock = _num(safety_stock)
@@ -120,14 +104,8 @@ def compute_order_quantity(required_qty, moq) -> int:
 
 def compute_order_by_date(production_start_date: Optional[date], lead_time_days) -> Optional[date]:
     """
-    발주권장일(= 예전 '발주예상일'의 의미 수정판)
-    ------------------------------------------------
-    "생산을 위해 언제 발주하면 좋을지"를 나타내는 날짜입니다.
-    = 생산 시작 예정일 - 리드타임(일)
-
-    (기존에는 '오늘+리드타임'으로 계산해서 '언제 자재가 들어올지'에 가까운
-    의미였는데, 실제로 필요한 건 '늦어도 언제까지는 발주를 넣어야
-    생산 시작일에 자재가 맞춰 들어오는지'이므로 계산식을 이렇게 수정했습니다.)
+    발주권장일 = 생산 시작일 - 리드타임(일)
+    "생산 시작일에 자재가 맞춰 들어오려면 늦어도 언제까지는 발주를 넣어야 하는가"
     """
     if production_start_date is None:
         return None
@@ -147,8 +125,6 @@ def compute_optimal_production_start(
     '생산소요일'은 자재가 다 갖춰진 상태에서 실제 생산 공정 자체가
     며칠 걸리는지를 나타냅니다. 이 둘로 역산하면, 마감일을 맞추기 위해
     "가장 늦어도 이 날짜에는 생산을 시작해야 한다"는 시작일이 나옵니다.
-    (너무 일찍 시작하면 완제품 재고를 불필요하게 오래 들고 있어야 하므로,
-    이 시작일이 곧 최적의 시작일이 됩니다.)
     """
     if production_deadline is None:
         return None
