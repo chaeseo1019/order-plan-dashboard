@@ -20,8 +20,7 @@ streamlit run app.py
 | `calculations.py` | 계산 로직만 모아둔 순수 함수 (생산이력 요약, 필요수량/발주수량/발주권장일 등) |
 | `data_prep.py` | 생산입고현황 원본 데이터 정리 함수 (날짜 접미사 제거, 빈 품목코드 행 제거) |
 | `requirements.txt` | 의존 패키지 |
-| `.streamlit/config.toml` | 서버 설정 (업로드 용량 등) |
-| `run_with_chrome.bat` | (Windows) 기본 브라우저와 상관없이 Chrome으로 바로 여는 실행 스크립트 |
+
 
 ## 업로드할 엑셀 파일 형식
 
