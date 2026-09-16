@@ -552,10 +552,15 @@ else:
 # 5️⃣ 결과 다운로드
 # ============================================================
 st.subheader("⬇️ 결과 다운로드")
-csv = results[display_cols].to_csv(index=False).encode("utf-8-sig")
+
+excel_buffer = BytesIO()
+with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+    display_df[display_cols].to_excel(writer, index=False, sheet_name="발주계획")
+excel_buffer.seek(0)
+
 st.download_button(
-    "CSV로 다운로드",
-    csv,
-    file_name=f"발주계획_{selected_code}_{asof_date.isoformat()}.csv",
-    mime="text/csv",
+    "엑셀로 다운로드",
+    excel_buffer,
+    file_name=f"발주계획_{selected_code}_{asof_date.isoformat()}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
