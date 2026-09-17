@@ -1,5 +1,7 @@
 # 제품별 발주 계획 대시보드 (Streamlit)
 
+사이트 링크: https://order-plan-dashboard.streamlit.app/
+
 엑셀로 만들었던 "발주계획" 시트를, BOM/재고/생산입고 데이터를 매번 업로드해서 쓰는
 **웹 대시보드**로 옮긴 버전입니다.
 
